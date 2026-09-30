@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serverless File Manager</title>
+    <!-- AWS SDK for Amazon Cognito Identity Provider -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/aws-sdk/2.1354.0/aws-sdk.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@6.1.2/dist/amazon-cognito-identity.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+        .card { border: 1px solid #ccc; padding: 20px; border-radius: 8px; max-width: 450px; margin-bottom: 20px; }
+        input[type="text"], input[type="email"], input[type="password"] { width: 100%; padding: 8px; margin: 8px 0; box-sizing: border-box; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        .hidden { display: none; }
+        .status { margin-top: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>Serverless File Upload Web App</h1>
+
+    <!-- Authentication Section -->
+    <div id="auth-section" class="card">
+        <h2>Sign In / Sign Up</h2>
+        <input type="email" id="email" placeholder="Email" required><br>
+        <input type="password" id="password" placeholder="Password" required><br>
+        <button onclick="signUp()">Sign Up</button>
+        <button onclick="signIn()">Sign In</button>
+        
+        <div id="confirm-box" class="hidden">
+            <hr>
+            <h3>Confirm Email</h3>
+            <input type="text" id="verification-code" placeholder="Verification Code"><br>
+            <button onclick="confirmSignUp()">Confirm Code</button>
+        </div>
+    </div>
+
+    <!-- Main Dashboard Section (Hidden until authenticated) -->
+    <div id="dashboard-section" class="card hidden">
+        <h2>Upload File</h2>
+        <p>Logged in as: <span id="user-display"></span></p>
+        <input type="file" id="file-input"><br><br>
+        <button onclick="uploadFile()">Upload File</button>
+        <button onclick="signOut()" style="background-color: #dc3545;">Sign Out</button>
+    </div>
+
+    <div id="status-message" class="status"></div>
+
+    <script>
+        // CONFIGURATION: Replace these values with your AWS Setup
+        const COGNITO_USER_POOL_ID = 'us-east-1_yLZS5ZQR0'; // e.g., 'us-east-1_XXXXXXXXX'
+        const COGNITO_CLIENT_ID = 'u2r9vcsfvmhravtsm6ahssrm2';       // e.g., '1h234567890abcdef...'
+        const API_GATEWAY_URL = 'https://8qyxlpgbk3.execute-api.us-east-1.amazonaws.com/prod/upload';           // e.g., 'https://xyz.execute-api.us-east-1.amazonaws.com/prod/upload'
+
+        const poolData = {
+            UserPoolId: COGNITO_USER_POOL_ID,
+            ClientId: COGNITO_CLIENT_ID
+        };
+        const userPool = new AmazonCognitoIdentity.CognitoUserPool(poolData);
+        let idToken = null;
+
+        function showMessage(msg, isError = false) {
+            const statusDiv = document.getElementById('status-message');
+            statusDiv.textContent = msg;
+            statusDiv.style.color = isError ? 'red' : 'green';
+        }
+
+        // 1. User Sign Up
+        function signUp() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+
+            const attributeList = [
+                new AmazonCognitoIdentity.CognitoUserAttribute({ Name: 'email', Value: email })
+            ];
+
+            userPool.signUp(email, password, attributeList, null, (err, result) => {
+                if (err) {
+                    showMessage(err.message || JSON.stringify(err), true);
+                    return;
+                }
+                showMessage('Sign-up successful! Check your email for the verification code.');
+                document.getElementById('confirm-box').classList.remove('hidden');
+            });
+        }
+
+        // 2. Confirm Email Sign Up Code
+        function confirmSignUp() {
+            const email = document.getElementById('email').value;
+            const code = document.getElementById('verification-code').value;
+
+            const cognitoUser = new AmazonCognitoIdentity.CognitoUser({
+                Username: email,
+                Pool: userPool
+            });
+
+            cognitoUser.confirmRegistration(code, true, (err, result) => {
+                if (err) {
+                    showMessage(err.message || JSON.stringify(err), true);
+                    return;
+                }
+                showMessage('Account verified successfully! You can now Sign In.');
+                document.getElementById('confirm-box').classList.add('hidden');
+            });
+        }
+
+        // 3. User Sign In
+        function signIn() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+
+            const authenticationData = { Username: email, Password: password };
+            const authenticationDetails = new AmazonCognitoIdentity.AuthenticationDetails(authenticationData);
+
+            const cognitoUser = new AmazonCognitoIdentity.CognitoUser({
+                Username: email,
+                Pool: userPool
+            });
+
+            cognitoUser.authenticateUser(authenticationDetails, {
+                onSuccess: (result) => {
+                    idToken = result.getIdToken().getJwtToken();
+                    document.getElementById('user-display').textContent = email;
+                    document.getElementById('auth-section').classList.add('hidden');
+                    document.getElementById('dashboard-section').classList.remove('hidden');
+                    showMessage('Signed in successfully.');
+                },
+                onFailure: (err) => {
+                    showMessage(err.message || JSON.stringify(err), true);
+                }
+            });
+        }
+
+        // 4. User Sign Out
+        function signOut() {
+            const cognitoUser = userPool.getCurrentUser();
+            if (cognitoUser) {
+                cognitoUser.signOut();
+            }
+            idToken = null;
+            document.getElementById('auth-section').classList.remove('hidden');
+            document.getElementById('dashboard-section').classList.add('hidden');
+            showMessage('Signed out.');
+        }
+
+        // 5. Upload File (Gets Pre-signed URL from API Gateway -> Lambda, then uploads direct to S3)
+        async function uploadFile() {
+            const fileInput = document.getElementById('file-input');
+            if (!fileInput.files.length) {
+                showMessage('Please select a file first.', true);
+                return;
+            }
+
+            const file = fileInput.files[0];
+            showMessage('Requesting upload URL...');
+
+            try {
+                // Step A: Call API Gateway to get pre-signed URL from Lambda
+                const apiResponse = await fetch(API_GATEWAY_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': idToken,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        fileName: file.name,
+                        fileType: file.type
+                    })
+                });
+
+                const data = await apiResponse.json();
+                if (!apiResponse.ok) {
+                    throw new Error(data.message || 'Failed to get upload URL');
+                }
+
+                const uploadUrl = data.uploadUrl;
+                showMessage('Uploading file to S3...');
+
+                // Step B: Direct upload to S3 using Pre-signed URL
+                const s3Response = await fetch(uploadUrl, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': file.type
+                    },
+                    body: file
+                });
+
+                if (s3Response.ok) {
+                    showMessage('File uploaded successfully and metadata saved!');
+                    fileInput.value = '';
+                } else {
+                    throw new Error('S3 upload failed.');
+                }
+
+            } catch (err) {
+                showMessage(err.message, true);
+            }
+        }
+    </script>
+</body>
+</html>
